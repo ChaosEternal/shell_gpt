@@ -96,7 +96,7 @@ def main(
         callback=get_sgpt_version,
     ),
     chat: str = typer.Option(
-        None,
+        "auto",
         help="Follow conversation with id, " 'use "temp" for quick session.',
         rich_help_panel="Chat Options",
     ),
@@ -105,9 +105,14 @@ def main(
         help="Start a REPL (Read–eval–print loop) session.",
         rich_help_panel="Chat Options",
     ),
-    show_chat: str = typer.Option(
-        None,
+    show_chat: bool = typer.Option(
+        False,
         help="Show all messages from provided chat id.",
+        rich_help_panel="Chat Options",
+    ),
+    show_last_chat: bool = typer.Option(
+        False,
+        help="Show last message from provided chat id.",
         rich_help_panel="Chat Options",
     ),
     list_chats: bool = typer.Option(
@@ -184,14 +189,20 @@ def main(
             pass
 
     if show_chat:
-        ChatHandler.show_messages(show_chat, md)
+        ChatHandler.show_messages(chat, md)
+        return
+
+    if show_last_chat:
+        ChatHandler.show_messages(chat, md, -1)
+        return
+
 
     if sum((shell, describe_shell, code)) > 1:
         raise BadArgumentUsage(
             "Only one of --shell, --describe-shell, and --code options can be used at a time."
         )
 
-    if chat and repl:
+    if chat!="auto" and repl:
         raise BadArgumentUsage("--chat and --repl options cannot be used together.")
 
     if editor and stdin_passed:
@@ -219,7 +230,7 @@ def main(
             functions=function_schemas,
         )
 
-    if chat:
+    elif chat:
         full_completion = ChatHandler(chat, role_class, md).handle(
             prompt=prompt,
             model=model,

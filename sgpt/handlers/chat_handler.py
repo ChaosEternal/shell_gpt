@@ -1,6 +1,8 @@
 import json
+import os
 from pathlib import Path
 from typing import Any, Callable, Dict, Generator, List, Optional
+from urllib.parse import quote
 
 import typer
 from click import BadArgumentUsage
@@ -15,6 +17,8 @@ from .handler import Handler
 CHAT_CACHE_LENGTH = int(cfg.get("CHAT_CACHE_LENGTH"))
 CHAT_CACHE_PATH = Path(cfg.get("CHAT_CACHE_PATH"))
 
+DOT_SGPT_CHAT_ID = ".sgpt_chat_id"
+DOT_GIT = ".git"
 
 class ChatSession:
     """
@@ -100,7 +104,10 @@ class ChatHandler(Handler):
 
     def __init__(self, chat_id: str, role: SystemRole, markdown: bool) -> None:
         super().__init__(role, markdown)
-        self.chat_id = chat_id
+        if chat_id == "auto":
+            self.chat_id = ChatHandler.auto_chat_id()
+        else:
+            self.chat_id = chat_id
         self.role = role
 
         if chat_id == "temp":
@@ -131,11 +138,13 @@ class ChatHandler(Handler):
             typer.echo(chat_id)
 
     @classmethod
-    def show_messages(cls, chat_id: str, markdown: bool) -> None:
+    def show_messages(cls, chat_id: str, markdown: bool, start=0) -> None:
+        if chat_id == "auto":
+            chat_id = cls.auto_chat_id()
         color = cfg.get("DEFAULT_COLOR")
         if "APPLY MARKDOWN" in cls.initial_message(chat_id) and markdown:
             theme = cfg.get("CODE_THEME")
-            for message in cls.chat_session.get_messages(chat_id):
+            for message in cls.chat_session.get_messages(chat_id)[start:]:
                 if message.startswith("assistant:"):
                     Console().print(Markdown(message, code_theme=theme))
                 else:
@@ -143,9 +152,31 @@ class ChatHandler(Handler):
                 typer.echo()
             return
 
-        for index, message in enumerate(cls.chat_session.get_messages(chat_id)):
+        for index, message in enumerate(cls.chat_session.get_messages(chat_id)[start:]):
             running_color = color if index % 2 == 0 else "green"
             typer.secho(message, fg=running_color)
+
+    @classmethod
+    def auto_chat_id(cls) -> str:
+        current_dir = Path.cwd()
+
+        while True:
+            if (dot_sgpt_file := current_dir / DOT_SGPT_CHAT_ID).is_file():
+                return dot_sgpt_file.read_text().strip()
+
+            if (dot_git := current_dir / DOT_GIT).exists():
+                return "GIT_" + quote(dot_git.as_posix(), safe="")
+            if current_dir == current_dir.parent:
+                break
+            current_dir = current_dir.parent
+
+        if sh:=os.getenv("SHELL"):
+            if os.path.basename(sh) in ["bash", "sh", "zsh"]:
+                sid = os.getsid(0)
+                return f"SHELL_{sid}"
+
+        raise Exception("Can't determine chat_id for auto: no .sgpt_chat_id found, not in git repo and not in a shell")
+
 
     def validate(self) -> None:
         if self.initiated:
