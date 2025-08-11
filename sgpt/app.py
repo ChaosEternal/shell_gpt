@@ -104,13 +104,15 @@ def main(
         help="Start a REPL (Read–eval–print loop) session.",
         rich_help_panel="Chat Options",
     ),
-    show_chat: bool = typer.Option(
-        False,
-        help="Show all messages from provided chat id.",
+    show_chat: int = typer.Option(
+        None,
+        help="Show messages of provided chat id starting from index.",
         rich_help_panel="Chat Options",
     ),
     show_last_chat: bool = typer.Option(
         False,
+        "--show-last-chat",
+        "-lm",
         help="Show last message from provided chat id.",
         rich_help_panel="Chat Options",
     ),
@@ -187,8 +189,8 @@ def main(
             # Non-interactive shell.
             pass
 
-    if show_chat:
-        ChatHandler.show_messages(chat, md)
+    if show_chat is not None:
+        ChatHandler.show_messages(chat, md, show_chat)
         return
 
     if show_last_chat:
