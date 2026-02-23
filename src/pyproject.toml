@@ -1,0 +1,22 @@
+[build-system]
+requires = ["setuptools", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "sadk"
+version = "0.1.0"
+description = "Commandline agent invoker"
+readme = "README.md"
+requires-python = ">=3.10" # Cyclopts requires Python >= 3.10
+dependencies = [
+    "cyclopts",
+    "openai",
+    "openai-agents",
+    "python-frontmatter",
+    "rich",
+    "toml",
+]
+
+[project.scripts]
+# specific to your previous main.py setup
+sadk = "sadk.main:cli"

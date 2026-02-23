@@ -1,0 +1,60 @@
+=============== granite-embedding:278m
+(77, 'newsession', '{"id": "__fake_id__", "summary": [], "type": "reasoning", "content": [{"text": "We need to fetch current time. Use terminal? We can run date.", "type": "reasoning_text"}]}', 154)
+(225, 'GIT_%2Fhome%2Fchaos%2Fsrc%2Fshell_adk%2F.git', '{"content": "what time is it", "role": "user"}', 155)
+(10, 'GIT_%2Fhome%2Fchaos%2Fsrc%2Fshell_adk%2F.git', '{"id": "__fake_id__", "content": [{"annotations": [], "text": "**Current time:**  \\n```\\nFri Nov 14 22:50:54 AEDT 2025\\n```\\n(See the output from the `date` command.)", "type": "output_text", "logprobs": []}], "role": "assistant", "status": "completed", "type": "message"}', 178)
+(11, 'GIT_%2Fhome%2Fchaos%2Fsrc%2Fshell_adk%2F.git', '{"content": "what time is it now? Use the linux date command.", "role": "user"}', 185)
+(19, 'GIT_%2Fhome%2Fchaos%2Fsrc%2Fshell_adk%2F.git', '{"id": "__fake_id__", "content": [{"annotations": [], "text": "**Current time (via `date`):**  \\n```\\nFri Nov 14 23:01:01 AEDT 2025\\n```\\n", "type": "output_text", "logprobs": []}], "role": "assistant", "status": "completed", "type": "message"}', 190)
+(75, 'GIT_%2Fhome%2Fchaos%2Fsrc%2Fshell_adk%2F.git', '{"id": "__fake_id__", "content": [{"annotations": [], "text": "**Current time (via `date`):**  \\n```\\nSat Nov 15 18:16:17 AEDT 2025\\n```\\n", "type": "output_text", "logprobs": []}], "role": "assistant", "status": "completed", "type": "message"}', 190)
+(67, 'GIT_%2Fhome%2Fchaos%2Fsrc%2Fshell_adk%2F.git', '{"content": "hi, what time is it now?", "role": "user"}', 191)
+(68, 'GIT_%2Fhome%2Fchaos%2Fsrc%2Fshell_adk%2F.git', '{"id": "__fake_id__", "summary": [], "type": "reasoning", "content": [{"text": "User asks: \\"hi, what time is it now?\\" We need to display current time using date. In previous conversation, we used send_keys tool to run date and read output. So we must again use send_keys to send \\"date\\" command and read output. We should respond with the time. Use the tool.\\n\\nWe should send_keys: [\\"date\\",\\"Enter\\"]. Then read_command_output wait:1. Then output the time.\\n\\nLet\'s do that.", "type": "reasoning_text"}]}', 191)
+(76, 'newsession', '{"content": "hi, what time is it now?", "role": "user"}', 191)
+(233, 'GIT_%2Fhome%2Fchaos%2Fsrc%2Fshell_adk%2F.git', '{"id": "__fake_id__", "content": [{"annotations": [], "text": "**Current time (via `date`):**  \\n```\\nThu Nov 27 20:12:53 AEDT 2025\\n```\\n", "type": "output_text", "logprobs": []}], "role": "assistant", "status": "completed", "type": "message"}', 193)
+
+real	0m8.702s
+user	0m0.921s
+sys	0m0.081s
+=============== embeddinggemma:300m
+(225, 'GIT_%2Fhome%2Fchaos%2Fsrc%2Fshell_adk%2F.git', '{"content": "what time is it", "role": "user"}', 122)
+(222, 'GIT_%2Fhome%2Fchaos%2Fsrc%2Fshell_adk%2F.git', '{"content": "hi", "role": "user"}', 161)
+(67, 'GIT_%2Fhome%2Fchaos%2Fsrc%2Fshell_adk%2F.git', '{"content": "hi, what time is it now?", "role": "user"}', 169)
+(76, 'newsession', '{"content": "hi, what time is it now?", "role": "user"}', 169)
+(26, 'GIT_%2Fhome%2Fchaos%2Fsrc%2Fshell_adk%2F.git', '{"content": "Yes, please go ahead", "role": "user"}', 175)
+(11, 'GIT_%2Fhome%2Fchaos%2Fsrc%2Fshell_adk%2F.git', '{"content": "what time is it now? Use the linux date command.", "role": "user"}', 178)
+(259, 'GIT_%2Fhome%2Fchaos%2Fsrc%2Fshell_adk%2F.git', '{"content": "how to list current objects\'s methods?", "role": "user"}', 180)
+(77, 'newsession', '{"id": "__fake_id__", "summary": [], "type": "reasoning", "content": [{"text": "We need to fetch current time. Use terminal? We can run date.", "type": "reasoning_text"}]}', 181)
+(6, 'GIT_%2Fhome%2Fchaos%2Fsrc%2Fshell_adk%2F.git', '{"id": "__fake_id__", "summary": [], "type": "reasoning", "content": [{"text": "We should read output.", "type": "reasoning_text"}]}', 187)
+(86, 'newsession', '{"content": "Thank you, then what time is it now in Shanghai?", "role": "user"}', 196)
+
+real	0m11.099s
+user	0m0.930s
+sys	0m0.077s
+=============== snowflake-arctic-embed2:latest
+(77, 'newsession', '{"id": "__fake_id__", "summary": [], "type": "reasoning", "content": [{"text": "We need to fetch current time. Use terminal? We can run date.", "type": "reasoning_text"}]}', 230)
+(11, 'GIT_%2Fhome%2Fchaos%2Fsrc%2Fshell_adk%2F.git', '{"content": "what time is it now? Use the linux date command.", "role": "user"}', 267)
+(19, 'GIT_%2Fhome%2Fchaos%2Fsrc%2Fshell_adk%2F.git', '{"id": "__fake_id__", "content": [{"annotations": [], "text": "**Current time (via `date`):**  \\n```\\nFri Nov 14 23:01:01 AEDT 2025\\n```\\n", "type": "output_text", "logprobs": []}], "role": "assistant", "status": "completed", "type": "message"}', 284)
+(75, 'GIT_%2Fhome%2Fchaos%2Fsrc%2Fshell_adk%2F.git', '{"id": "__fake_id__", "content": [{"annotations": [], "text": "**Current time (via `date`):**  \\n```\\nSat Nov 15 18:16:17 AEDT 2025\\n```\\n", "type": "output_text", "logprobs": []}], "role": "assistant", "status": "completed", "type": "message"}', 288)
+(233, 'GIT_%2Fhome%2Fchaos%2Fsrc%2Fshell_adk%2F.git', '{"id": "__fake_id__", "content": [{"annotations": [], "text": "**Current time (via `date`):**  \\n```\\nThu Nov 27 20:12:53 AEDT 2025\\n```\\n", "type": "output_text", "logprobs": []}], "role": "assistant", "status": "completed", "type": "message"}', 289)
+(1, 'GIT_%2Fhome%2Fchaos%2Fsrc%2Fshell_adk%2F.git', '{"content": "what time is it now? try use the tool send_keys to send date command and use read_command_ouput to read the result.", "role": "user"}', 295)
+(10, 'GIT_%2Fhome%2Fchaos%2Fsrc%2Fshell_adk%2F.git', '{"id": "__fake_id__", "content": [{"annotations": [], "text": "**Current time:**  \\n```\\nFri Nov 14 22:50:54 AEDT 2025\\n```\\n(See the output from the `date` command.)", "type": "output_text", "logprobs": []}], "role": "assistant", "status": "completed", "type": "message"}', 304)
+(225, 'GIT_%2Fhome%2Fchaos%2Fsrc%2Fshell_adk%2F.git', '{"content": "what time is it", "role": "user"}', 304)
+(68, 'GIT_%2Fhome%2Fchaos%2Fsrc%2Fshell_adk%2F.git', '{"id": "__fake_id__", "summary": [], "type": "reasoning", "content": [{"text": "User asks: \\"hi, what time is it now?\\" We need to display current time using date. In previous conversation, we used send_keys tool to run date and read output. So we must again use send_keys to send \\"date\\" command and read output. We should respond with the time. Use the tool.\\n\\nWe should send_keys: [\\"date\\",\\"Enter\\"]. Then read_command_output wait:1. Then output the time.\\n\\nLet\'s do that.", "type": "reasoning_text"}]}', 307)
+(67, 'GIT_%2Fhome%2Fchaos%2Fsrc%2Fshell_adk%2F.git', '{"content": "hi, what time is it now?", "role": "user"}', 313)
+
+real	0m12.832s
+user	0m0.950s
+sys	0m0.093s
+=============== nomic-embed-text:latest
+(77, 'newsession', '{"id": "__fake_id__", "summary": [], "type": "reasoning", "content": [{"text": "We need to fetch current time. Use terminal? We can run date.", "type": "reasoning_text"}]}', 171)
+(19, 'GIT_%2Fhome%2Fchaos%2Fsrc%2Fshell_adk%2F.git', '{"id": "__fake_id__", "content": [{"annotations": [], "text": "**Current time (via `date`):**  \\n```\\nFri Nov 14 23:01:01 AEDT 2025\\n```\\n", "type": "output_text", "logprobs": []}], "role": "assistant", "status": "completed", "type": "message"}', 190)
+(67, 'GIT_%2Fhome%2Fchaos%2Fsrc%2Fshell_adk%2F.git', '{"content": "hi, what time is it now?", "role": "user"}', 196)
+(76, 'newsession', '{"content": "hi, what time is it now?", "role": "user"}', 196)
+(10, 'GIT_%2Fhome%2Fchaos%2Fsrc%2Fshell_adk%2F.git', '{"id": "__fake_id__", "content": [{"annotations": [], "text": "**Current time:**  \\n```\\nFri Nov 14 22:50:54 AEDT 2025\\n```\\n(See the output from the `date` command.)", "type": "output_text", "logprobs": []}], "role": "assistant", "status": "completed", "type": "message"}', 204)
+(233, 'GIT_%2Fhome%2Fchaos%2Fsrc%2Fshell_adk%2F.git', '{"id": "__fake_id__", "content": [{"annotations": [], "text": "**Current time (via `date`):**  \\n```\\nThu Nov 27 20:12:53 AEDT 2025\\n```\\n", "type": "output_text", "logprobs": []}], "role": "assistant", "status": "completed", "type": "message"}', 207)
+(225, 'GIT_%2Fhome%2Fchaos%2Fsrc%2Fshell_adk%2F.git', '{"content": "what time is it", "role": "user"}', 210)
+(11, 'GIT_%2Fhome%2Fchaos%2Fsrc%2Fshell_adk%2F.git', '{"content": "what time is it now? Use the linux date command.", "role": "user"}', 222)
+(259, 'GIT_%2Fhome%2Fchaos%2Fsrc%2Fshell_adk%2F.git', '{"content": "how to list current objects\'s methods?", "role": "user"}', 224)
+(1, 'GIT_%2Fhome%2Fchaos%2Fsrc%2Fshell_adk%2F.git', '{"content": "what time is it now? try use the tool send_keys to send date command and use read_command_ouput to read the result.", "role": "user"}', 227)
+
+real	0m3.440s
+user	0m0.920s
+sys	0m0.084s
