@@ -3,6 +3,7 @@ from contextlib import AsyncExitStack
 from dataclasses import dataclass, field
 import json
 import pathlib
+from pathlib import Path
 import os
 import sqlite3
 import uuid
@@ -104,11 +105,35 @@ class Memory(SQLiteSession):
 
     async def save_from(
         self,
-        session: Session
+        session: Session,
+        chat_id: str,
     ):
         self.session_id = str(uuid.uuid4())
         items = await session.get_items()
         await self.add_items(items)
+        # Tag the newly saved session with its chat_id
+        conn = self._get_connection()
+        conn.execute(
+            f"UPDATE {self.sessions_table} SET chat_id = ? WHERE session_id = ?",
+            (chat_id, self.session_id),
+        )
+        conn.commit()
+
+    async def save_items(
+        self,
+        items: list,
+        chat_id: str,
+    ) -> str:
+        """Save raw conversation items and tag them with chat_id. Returns the new session_id."""
+        self.session_id = str(uuid.uuid4())
+        await self.add_items(items)
+        conn = self._get_connection()
+        conn.execute(
+            f"UPDATE {self.sessions_table} SET chat_id = ? WHERE session_id = ?",
+            (chat_id, self.session_id),
+        )
+        conn.commit()
+        return self.session_id
 
     @override
     def _get_connection(self):
@@ -178,15 +203,18 @@ class Memory(SQLiteSession):
             vec: List[str],
             topk: int,
             no_payload: bool = True,
-            exclude: list[int]=None):
+            exclude: list[int]=None,
+            chat_id: str | None = None):
         args = vec[0:3]
+        where_clauses = []
         if exclude:
-            where = "AND id not in ("
-            where += ", ".join(["?"] * len(exclude))
-            where +=")"
+            placeholders = ", ".join(["?"] * len(exclude))
+            where_clauses.append(f"id not in ({placeholders})")
             args.extend(exclude)
-        else:
-            where = ""
+        if chat_id is not None:
+            where_clauses.append("s.chat_id = ?")
+            args.append(chat_id)
+        where = ("AND " + " AND ".join(where_clauses)) if where_clauses else ""
         args += [topk]
         message_column = "m.message_data," if not no_payload else ""
         SQL = f"""
@@ -237,12 +265,86 @@ class Memory(SQLiteSession):
                     text = "\n".join(i.get("text", "") for i in content)
                 elif isinstance(content, str):
                     text = content
-            if text and len(text) < 1800:
+            if text and len(text) < 4000:
                 emb = await embed_gear.get_embedding(text)
             else:
                 emb = "not embedable"
             conn.execute(UPDATE, (emb, message_id))
         conn.commit()
+
+    @classmethod
+    def create(cls) -> "Memory":
+        """Create and initialise the Memory instance from env/config."""
+        if memory_db_file := os.getenv("MEMORY_DB_PATH"):
+            session_db_file = memory_db_file
+        else:
+            ah = AgentHive()
+            session_db_file = str(ah.config_dir / "session.db")
+        mem = cls("all", session_db_file)
+        mem.init_database()
+        return mem
+
+    async def search_and_format(
+        self,
+        embeder: "EmbedGear",
+        description: str,
+        summary: str,
+        hypothesis: str,
+        chat_id: str,
+        token_limit: int = 96000,
+    ) -> tuple[str, List[str]]:
+        """
+        Vector-search past sessions belonging to chat_id and return their contents as flattened text.
+
+        Returns:
+            (text, recalled_session_ids)
+            text is human-readable; tool results are replaced by RESULT_OMITTED.
+        """
+        v = [await embeder.get_embedding(q) for q in [description, summary, hypothesis]]
+        try:
+            similar = await self.search_similar(v, 1000, chat_id=chat_id)
+        except Exception as e:
+            print(e)
+            raise
+
+        # Deduplicate, preserving rank order
+        seen: set = set()
+        ranked_ids: List[str] = []
+        for _msg_id, session_id, *_ in similar:
+            if session_id not in seen:
+                seen.add(session_id)
+                ranked_ids.append(session_id)
+
+        print(f"[Memory.search_and_format] unique sessions: {len(ranked_ids)}")
+
+        tokens_used = 0
+        output_parts: List[str] = []
+        recalled: List[str] = []
+
+        for session_id in ranked_ids:
+            past_items = await self.get_items_by_session_id(session_id)
+            if not past_items:
+                continue
+
+            non_tool = [item for item, _ in past_items if item.get("role") != "tool"]
+            session_tokens = estimate_tokens(non_tool)
+            if tokens_used + session_tokens > token_limit:
+                break
+
+            tokens_used += session_tokens
+            recalled.append(session_id)
+
+            lines = [
+                line for item, _ in past_items
+                if (line := _format_item_as_text(item)) is not None
+            ]
+            if lines:
+                output_parts.append(f"=== Session {session_id} ===\n" + "\n".join(lines))
+
+        text = "\n\n".join(output_parts) if output_parts else "No matching memory found."
+        print(f"[Memory.search_and_format] sessions in result: {len(output_parts)}")
+        return text, recalled
+
 
 class EmbedGear:
     def __init__(self, embedding_client, embedding_model="nomic-embed-text:latest"):
@@ -260,27 +362,18 @@ class EmbedGear:
         return packed.tobytes().hex()
 
 
-def create_memory():
-    
-    if memory_db_file := os.getenv("MEMORY_DB_PATH"):
-        session_db_file = memory_db_file
-    else:
-        ah = AgentHive()
-        config_home = ah.config_dir
-        session_db_file = str(config_home / "session.db")
-
-    mem = Memory("all", session_db_file)
-    mem.init_database()
-    return mem
 
 @dataclass
 class MemoryContext:
     session: Memory
     embeder: EmbedGear
+    chat_id: str
     # A temporary holding area for items fetched during this turn
     memory_items: List[str] = field(default_factory=list)
     recalled_sessions: List[str] = field(default_factory=list)
     final_rank: int = 1
+    # Set to True once search_in_memory has been called; gates recent-session injection
+    search_done: bool = False
 
 @function_tool
 async def leave_note_and_rate(ctx: RunContextWrapper[MemoryContext], note: str, rank: int) -> str:
@@ -306,6 +399,47 @@ async def leave_note_and_rate(ctx: RunContextWrapper[MemoryContext], note: str, 
     await rate_before_final(ctx, rank)
     return "Note and rank are saved."
 
+def _format_item_as_text(item: dict) -> str | None:
+    """
+    Render a single conversation item as a human-readable line.
+    Every branch uses the uniform format:  [role]: content
+      - tool results        ->  [tool]: RESULT_OMITTED
+      - assistant tool call ->  [assistant]: fn_name(args)
+      - text content        ->  [role]: text
+    """
+    role = item.get("role", "unknown")
+
+    # Tool results: always omit the payload
+    if role == "tool":
+        return "[tool]: RESULT_OMITTED"
+
+    # Assistant tool-use calls (OpenAI chat format)
+    tool_calls = item.get("tool_calls")
+    if tool_calls and role == "assistant":
+        parts = []
+        for tc in tool_calls:
+            fn = tc.get("function") or {}
+            name = fn.get("name", "?")
+            args = fn.get("arguments", "{}")
+            parts.append(f"[tool call: {name}({args})]")
+        return "\n".join(parts) if parts else None
+
+    # Regular text content
+    content = item.get("content", "")
+    if isinstance(content, str):
+        text = content.strip()
+        return f"[{role}]: {text}" if text else None
+    if isinstance(content, list):
+        texts = [
+            part.get("text", "").strip()
+            for part in content
+            if isinstance(part, dict) and part.get("type") == "text"
+        ]
+        texts = [t for t in texts if t]
+        return f"[{role}]: {' '.join(texts)}" if texts else None
+    return None
+
+
 async def search_in_memory_raw(
     ctx: RunContextWrapper[MemoryContext],
     description: str,
@@ -313,48 +447,34 @@ async def search_in_memory_raw(
     hypothesis: str
 ) -> str:
     """
-    Searches memory using semantic vector similarity. Accepts multiple search angles to improve accuracy.
+    Search past sessions using semantic vector similarity and return their contents as text.
 
-    CRITICAL USAGE INSTRUCTIONS:p
+    CRITICAL USAGE INSTRUCTIONS:
     - This tool uses embedding distance, NOT keyword matching.
-    - Do NOT use short keywords, boolean operators, or vague queries (e.g., "python error").
-    - You MUST generate full, hypothetical sentences or paragraphs that represent the *content* you expect to find.
-    - The search engine matches the semantic meaning of your input against the stored memories.
+    - Do NOT use short keywords or vague queries (e.g., "python error").
+    - Generate full, hypothetical sentences/paragraphs representing the *content* you expect to find.
 
-    The found items will NOT be returned directly. Instead, they will be injected into
-      the conversation history and will appear in chronological order relative to the current interaction.
+    The returned text contains the matched sessions flattened into readable lines.
+    Tool call results from those sessions are replaced with RESULT_OMITTED.
+    Tool calls themselves are shown as function-call lines.
 
     Args:
-        queries (List[str]): A list of exactly 3 distinct hypothetical search variations to maximize recall:
-        description (str): A direct, technical description of the information.
+        description (str): A direct, technical description of the information sought.
         summary (str): A conversational or colloquial summary of the event.
-        hypothesis (str). A hypothetical snippet of the specific log, code, or text you are looking for.
+        hypothesis (str): A hypothetical snippet of the specific log, code, or text you are looking for.
 
     Returns:
-        str: A string indicating whether or not some items were found.
+        str: Matched session contents as human-readable text, or a not-found message.
     """
-    # Access our "Session DB" from the context
+    mem_ctx = ctx.context
+    text, recalled = await mem_ctx.session.search_and_format(
+        mem_ctx.embeder, description, summary, hypothesis,
+        chat_id=mem_ctx.chat_id,
+    )
+    mem_ctx.search_done = True
+    mem_ctx.recalled_sessions.extend(recalled)
+    return text
 
-    queries = [description, summary, hypothesis]
-    session = ctx.context.session
-    embeder = ctx.context.embeder
-    memory_items = ctx.context.memory_items
-#    memory_items.clear()
-
-    v = [await embeder.get_embedding(q) for q in queries]
-    try:
-        l = await session.search_similar(v, 1000)
-    except Exception as e:
-        print(e)
-        raise e
-    for i, s, *_ in l:
-        memory_items.append(s)
-    print("Found memory, items:", len(memory_items))
-    if memory_items:
-        # Found it! Stage it for injection.
-        return "Memory found and staged, look for RECENT MEMORY or RECALLED MEMORY in conversation."
-
-    return f"No item found."
 
 search_in_memory = function_tool(func=search_in_memory_raw, name_override="search_in_memory")
 
@@ -400,87 +520,112 @@ def estimate_tokens(items: List[TResponseInputItem]) -> int:
                     total_chars += len(part.get("text", ""))
     return total_chars // 4
 
-async def inject_staged_items_filter(data: CallModelData[MemoryContext]) -> ModelInputData:
+
+def _is_search_in_memory_call(item: dict) -> bool:
+    """Return True if this is an assistant message that only calls search_in_memory."""
+    if item.get("role") != "assistant":
+        return False
+    tool_calls = item.get("tool_calls") or []
+    return bool(tool_calls) and all(
+        (tc.get("function") or {}).get("name") == "search_in_memory"
+        for tc in tool_calls
+    )
+
+
+def _strip_tool_outputs(items: list) -> list:
+    """Remove tool outputs (role='tool') and search_in_memory calls from history items."""
+    return [
+        item for item in items
+        if item.get("role") != "tool" and not _is_search_in_memory_call(item)
+    ]
+
+
+async def _build_injected_sessions(
+    session: "Memory",
+    session_ids: List[str],
+    label: str,
+    token_budget: int,
+    seen_sessions: set,
+    recalled_sessions: List[str] | None = None,
+) -> tuple:
     """
-    An input filter that runs right before the model call.
-    It fetches content for staged memories and recent sessions, removes tool calls,
-    and respects a 96k cumulative token limit.
+    Fetch and filter sessions by ID, stripping tool outputs and honouring the token budget.
+    Returns (injected_messages, tokens_used).
+    """
+    injected: List[TResponseInputItem] = []
+    tokens_used = 0
+
+    if not session_ids:
+        return injected, tokens_used
+
+    injected.append({"role": "system", "content": f"--- {label} ---"})
+
+    for session_id in session_ids:
+        if session_id in seen_sessions:
+            continue
+        seen_sessions.add(session_id)
+
+        past_items = await session.get_items_by_session_id(session_id)
+        if not past_items:
+            continue
+
+        filtered = _strip_tool_outputs([item for item, _ in past_items])
+        session_tokens = estimate_tokens(filtered)
+
+        if tokens_used + session_tokens > token_budget:
+            break
+
+        tokens_used += session_tokens
+
+        if recalled_sessions is not None:
+            recalled_sessions.append(session_id)
+
+        injected.extend(filtered)
+
+    injected.append({"role": "system", "content": f"--- END OF {label} ---"})
+    return injected, tokens_used
+
+
+async def inject_recent_sessions_filter(data: CallModelData[MemoryContext]) -> ModelInputData:
+    """
+    Input filter: injects the 20 most recent sessions (tool outputs stripped) but ONLY
+    before search_in_memory has been called.  Once search_done is True the filter is a no-op
+    so the model isn't re-flooded with recent history on every subsequent model call.
+    Also injects a mandatory forcing message on the first turn so the model cannot skip
+    the search_in_memory call even with reasoning models.
     """
     context = data.context
-    if not context:
+    if not context or context.search_done:
+        # After search is done, stop injecting recent sessions
         return data.model_data
 
-    session = context.session
-    injected_messages: List[TResponseInputItem] = []
-
-    # Starting count with current session history
     current_history = list(data.model_data.input)
     current_token_count = estimate_tokens(current_history)
-    #    context.recalled_sessions.clear()
-    
     TOKEN_LIMIT = 96000
 
-    # 1. Fetch Recent Sessions (up to 20)
-    recent_session_ids = await session.get_recent_sessions(20)
+    recent_session_ids = await context.session.get_recent_sessions(20)
+    seen: set = set()
 
-    # Use a set to avoid duplicating sessions if a recent one was also recalled
-    seen_sessions = set()
+    injected, _ = await _build_injected_sessions(
+        context.session,
+        recent_session_ids,
+        "RECENT MEMORY",
+        TOKEN_LIMIT - current_token_count,
+        seen,
+    )
 
-    print("before inject, items:", len(context.memory_items))
-    
-    for mem_sets_name, mem_sets in [("RECALLED MEMORY", context.memory_items),
-                                    ("RECENT MEMORY", recent_session_ids)]:
-        if mem_sets:
-            header = {"role": "system", "content": f"--- {mem_sets_name} ---"}
-            print(header)
-            injected_messages.append(header)
-            
-        print("hist_size_a", current_token_count)
-        
-        for session_id in mem_sets:
-
-            if session_id in seen_sessions:
-                continue
-            seen_sessions.add(session_id)
-            past_items = await session.get_items_by_session_id(session_id)
-
-            if not past_items:
-                continue
-            
-            print("hist_size_b", current_token_count)
-            
-            # Rule: Remove tool call results
-            filtered_items = [item for item, created_at in past_items if item.get("role") != "tool"]
-
-            session_tokens = estimate_tokens(filtered_items)
-
-            # Rule: Only insert if we stay within the 96k total token limit
-            if current_token_count + session_tokens > TOKEN_LIMIT:
-                break
-
-            current_token_count += session_tokens
-
-            if mem_sets_name == "RECALLED MEMORY":
-                print("insert")
-                context.recalled_sessions.append(session_id)
-
-            injected_messages.extend(filtered_items)
-
-    if context.memory_items or recent_session_ids:
-        footer = {"role": "system", "content": f"--- END OF MEMORY ---"}
-        injected_messages.append(footer)
-        
-    # Combine: Recalled/Recent + Current Conversation History
-    new_input = injected_messages + current_history
-
-    # Clear the stage for the next loop
-    #context.memory_items.clear()
-
-    print("after injection", len(context.recalled_sessions))
+    # Hard forcing message: shown only before search_in_memory fires
+    force_msg = {
+        "role": "system",
+        "content": (
+            "[MANDATORY] Your FIRST and ONLY action right now is to call `search_in_memory`. "
+            "Do NOT write any text. Do NOT think out loud. Call the tool immediately."
+        ),
+    }
 
     return ModelInputData(
-        input=new_input,
-        instructions=data.model_data.instructions
+        input=injected + current_history + [force_msg],
+        instructions=data.model_data.instructions,
     )
 
 def _get_mcp_by_typename(tname: str, name: str, params: str):
@@ -509,11 +654,6 @@ def _get_mcp_by_typename(tname: str, name: str, params: str):
 async def main(prompt, model_name="gpt-oss:latest", agent_name="default"):
     ah = AgentHive()
     agent_cfg = ah.get_agent(agent_name)
-    params = {
-        key: agent_cfg[key]
-        for key in ["name", "instructions"]
-        if key in agent_cfg
-    }
     client = AsyncOpenAI(
         base_url="http://127.0.0.1:11434/v1",
         api_key="dummy",
@@ -521,70 +661,116 @@ async def main(prompt, model_name="gpt-oss:latest", agent_name="default"):
     set_default_openai_client(client=client, use_for_tracing=False)
     set_default_openai_api("chat_completions")
     set_tracing_disabled(disabled=True)
-    params["model"] = model_name
-    params["model_settings"] = ModelSettings(
-        tool_choice="auto",
-        reasoning=Reasoning(effort="high")
-    )
-    # params["tools"] = [get_current_time]
+
+    base_model_settings = ModelSettings(tool_choice="auto")
+
     mcps = [
         _get_mcp_by_typename(x["type"], x["name"], x["params"])
         for x in agent_cfg.get("mcp", [])
     ]
-    params["tools"] = [
-        search_in_memory,
-        leave_note_and_rate,
-        read_tutorial
-    ]
-    
+
     if CONTINUITY_FILE.exists():
         with open(CONTINUITY_FILE, "r") as f:
             note = f.read()
         if note.strip():
-            # Inject the note into the prompt
             prompt = f"{prompt}\n\n[System Note from previous session]:\n{note}"
-    memory = create_memory()
+
+    memory = Memory.create()
     c = AsyncOpenAI(base_url="http://127.0.0.1:11435/v1", api_key="no")
     embeder = EmbedGear(c, "nomic-embed-text:latest")
 
-    ctx = MemoryContext(session=memory, embeder=embeder)
-    run_config = RunConfig(
-        call_model_input_filter=inject_staged_items_filter,
-    )
+    # Resolve chat_id: use the per-directory session file if present
+    chat_id_file = Path(".") / ".sadk_session_id"
+    if chat_id_file.exists():
+        chat_id = chat_id_file.read_text().strip()
+    else:
+        chat_id = str(uuid.uuid4())
+        chat_id_file.write_text(chat_id)
+
+    ctx = MemoryContext(session=memory, embeder=embeder, chat_id=chat_id)
     await memory.embed_memories(embeder)
+
+
+
     async with AsyncExitStack() as stack:
         mcp_servers = [await stack.enter_async_context(m) for m in mcps]
-        if mcps:
-            params["mcp_servers"] = mcp_servers
-        agent = Agent(
-            **params
+
+        # ── Agent 2: only leaves a note and rating ──────────────────────────
+        agent2_kwargs: dict = {
+            "name": "note_taker",
+            "model": model_name,
+            "model_settings": base_model_settings,
+            "instructions": (
+                "You are a memory note-taker. Your sole responsibility is to call "
+                "`leave_note_and_rate` with a concise note summarising what happened in "
+                "the conversation and a ranking of how useful the recalled memories were "
+                "(-2 to 2). Do nothing else."
+            ),
+            "tools": [leave_note_and_rate],
+        }
+        if mcp_servers:
+            agent2_kwargs["mcp_servers"] = mcp_servers
+        agent2 = Agent(**agent2_kwargs)
+
+        # ── Agent 1: main agent – searches memory then handles the user request ──
+        # search_in_memory MUST be the first tool call; once done, inject_recent_sessions_filter
+        # becomes a no-op (guarded by search_done flag) so recent sessions are not re-injected.
+        agent1_instructions = (
+            (agent_cfg.get("instructions") or "") +
+            "\n\n## TOOL PROTOCOL ADDENDUM\n"
+            "**`search_in_memory` (STEP 1 — REQUIRED FIRST CALL)**\n"
+            "- Derive three full-sentence queries from the user's prompt:\n"
+            "  - `description`: precise technical phrasing of what is sought\n"
+            "  - `summary`: colloquial/narrative restatement of the same topic\n"
+            "  - `hypothesis`: a hypothetical excerpt (log line, code snippet, note) you expect to find\n"
+            "- Do not use keywords. Write complete sentences.\n\n"
+            "**`leave_note_and_rate` — NOT AVAILABLE TO YOU**\n"
+            "- This tool is handled by the `note_taker` agent.\n"
+            "- When your work is complete, hand off to `note_taker`. Do not attempt to call "
+            "`leave_note_and_rate` yourself."
         )
+        agent1_kwargs: dict = {
+            "name": agent_cfg.get("name", "main_agent"),
+            "model": model_name,
+            # tool_choice="required" forces a tool call on every turn,
+            # preventing the model from skipping search_in_memory on the first turn.
+            "model_settings": ModelSettings(tool_choice="required"),
+            "instructions": agent1_instructions,
+            "tools": [search_in_memory, read_tutorial],
+            "handoffs": [agent2],
+        }
+        if mcp_servers:
+            agent1_kwargs["mcp_servers"] = mcp_servers
+        agent1 = Agent(**agent1_kwargs)
+
+        # inject_recent_sessions_filter fires only before search_in_memory is called
+        run_config = RunConfig(call_model_input_filter=inject_recent_sessions_filter)
         session = SQLiteSession("temp")
+
         try:
             result = Runner.run_streamed(
-                agent,
+                agent1,
                 prompt,
                 context=ctx,
                 run_config=run_config,
-                session=session)
+                session=session,
+            )
+            async for event in result.stream_events():
+                match event.type:
+                    case "raw_response_event":
+                        continue
+                    case "agent_updated_stream_event":
+                        Render().output(f"Handoff to Agent: {event.new_agent.name}")
+                    case "run_item_stream_event":
+                        ii = event.item.to_input_item()
+                        Render().output(simple_handle_response_input_item_param(ii))
+                    case _:
+                        print("other event")
+                        print(event)
         except agents.exceptions.MaxTurnsExceeded as e:
             print(e)
-            pass
 
-        async for event in result.stream_events():
-            match event.type:
-                case "raw_response_event":
-                    continue
-                case "agent_updated_stream_event":
-                    Render().output(f"Handoff to Agent: {event.new_agent.name}")
-                case "run_item_stream_event":
-                    ii = event.item.to_input_item()
-                    Render().output(simple_handle_response_input_item_param(ii))
-                case _:
-                    print("other event")
-                    print(event)
-
-        await memory.save_from(session)
+        await memory.save_from(session, chat_id)
 
     Render().output("\n---\n" + result.final_output)
 
