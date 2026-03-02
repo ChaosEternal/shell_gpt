@@ -2,8 +2,9 @@
 Memory REST server.
 
 Endpoints:
-    POST /search_in_memory  – vector-search past sessions by chat_id
-    POST /save_sessions     – persist conversation items tagged with chat_id
+    POST /search_in_memory    – vector-search past sessions by chat_id
+    POST /save_sessions       – persist conversation items tagged with chat_id
+    POST /leave_note_and_rate – save a session note and update recalled session ranks
 
 Run:
     uvicorn sadk.server:app --host 0.0.0.0 --port 8765
@@ -41,7 +42,6 @@ async def lifespan(app: FastAPI):
     embed_client = AsyncOpenAI(base_url=embed_base, api_key="no")
     _embeder = EmbedGear(embed_client, embed_model)
 
-    # Embed any sessions that were saved without embeddings
     await _memory.embed_memories(_embeder)
 
     yield
@@ -74,6 +74,17 @@ class SaveRequest(BaseModel):
 
 class SaveResponse(BaseModel):
     session_id: str
+
+
+class LeaveNoteRequest(BaseModel):
+    chat_id: str
+    note: str
+    rank: int
+    recalled_sessions: list[str] = []
+
+
+class StatusResponse(BaseModel):
+    status: str
 
 
 # ---------------------------------------------------------------------------
@@ -110,3 +121,14 @@ async def save_sessions(req: SaveRequest) -> SaveResponse:
         raise HTTPException(status_code=500, detail=str(exc)) from exc
 
     return SaveResponse(session_id=session_id)
+
+
+@app.post("/leave_note_and_rate", response_model=StatusResponse)
+async def leave_note_and_rate(req: LeaveNoteRequest) -> StatusResponse:
+    """Save a session note to chat_info and update ranks on recalled sessions."""
+    try:
+        await _memory.save_note(req.chat_id, req.note, req.rank, req.recalled_sessions)
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+    return StatusResponse(status="ok")

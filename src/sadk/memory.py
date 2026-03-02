@@ -33,6 +33,7 @@ from agents.model_settings import ModelSettings
 from mcp.types import CallToolResult, GetPromptResult, InitializeResult, ListPromptsResult, TextContent
 from openai import AsyncOpenAI
 from openai.types.shared import Reasoning
+from sadk.memory_client import MemoryClient
 from .utils import _Singleton, Render, simple_handle_response_input_item_param
 from .agent_hive import AgentHive
 from .tutorial import read_tutorial
@@ -90,6 +91,19 @@ class Memory(SQLiteSession):
         """
         self._patch_table(conn, sql, patch_id)
 
+    def _patch_table_04_chat_info(self, conn):
+        patch_id = "patch_20260302_chat_info"
+        sql = """
+        CREATE TABLE IF NOT EXISTS chat_info (
+            id          INTEGER PRIMARY KEY AUTOINCREMENT,
+            chat_id     TEXT    NOT NULL,
+            note        TEXT,
+            rank        INT     DEFAULT 0,
+            created_at  TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+        """
+        self._patch_table(conn, sql, patch_id)
+
     @override
     def _init_db_for_connection(self, conn: sqlite3.Connection):
         pass
@@ -101,6 +115,7 @@ class Memory(SQLiteSession):
         self._patch_table_01_add_embedding(init_conn, self.messages_table)
         self._patch_table_02_add_chat_id(init_conn, self.sessions_table)
         self._patch_table_03_add_rank(init_conn, self.sessions_table)
+        self._patch_table_04_chat_info(init_conn)
         init_conn.close()
 
     async def save_from(
@@ -118,6 +133,23 @@ class Memory(SQLiteSession):
             (chat_id, self.session_id),
         )
         conn.commit()
+
+    async def save_note(
+        self,
+        chat_id: str,
+        note: str,
+        rank: int,
+        recalled_sessions: List[str],
+    ) -> None:
+        """Persist a session note and update ranks on all recalled sessions."""
+        conn = self._get_connection()
+        conn.execute(
+            "INSERT INTO chat_info (chat_id, note, rank) VALUES (?, ?, ?)",
+            (chat_id, note, rank),
+        )
+        conn.commit()
+        for session_id in set(recalled_sessions):
+            await self.update_session_rank(session_id, delta=rank)
 
     async def save_items(
         self,
@@ -368,6 +400,7 @@ class MemoryContext:
     session: Memory
     embeder: EmbedGear
     chat_id: str
+    client: MemoryClient
     # A temporary holding area for items fetched during this turn
     memory_items: List[str] = field(default_factory=list)
     recalled_sessions: List[str] = field(default_factory=list)
@@ -392,11 +425,18 @@ async def leave_note_and_rate(ctx: RunContextWrapper[MemoryContext], note: str, 
                    0: Context was neutral or only slightly relevant.
                   -2: Context was irrelevant or distracting.
     """
+    mem_ctx = ctx.context
+    # Write the note locally for the startup-note feature
     CONTINUITY_FILE.parent.mkdir(parents=True, exist_ok=True)
     with open(CONTINUITY_FILE, "w") as f:
         f.write(note)
-
-    await rate_before_final(ctx, rank)
+    # Persist note + update ranks via the memory service
+    await mem_ctx.client.leave_note_and_rate(
+        chat_id=mem_ctx.chat_id,
+        note=note,
+        rank=rank,
+        recalled_sessions=list(set(mem_ctx.recalled_sessions)),
+    )
     return "Note and rank are saved."
 
 def _format_item_as_text(item: dict) -> str | None:
@@ -467,13 +507,15 @@ async def search_in_memory_raw(
         str: Matched session contents as human-readable text, or a not-found message.
     """
     mem_ctx = ctx.context
-    text, recalled = await mem_ctx.session.search_and_format(
-        mem_ctx.embeder, description, summary, hypothesis,
+    result = await mem_ctx.client.search_in_memory(
         chat_id=mem_ctx.chat_id,
+        description=description,
+        summary=summary,
+        hypothesis=hypothesis,
     )
     mem_ctx.search_done = True
-    mem_ctx.recalled_sessions.extend(recalled)
-    return text
+    mem_ctx.recalled_sessions.extend(result.recalled_sessions)
+    return result.text
 
 
 search_in_memory = function_tool(func=search_in_memory_raw, name_override="search_in_memory")
@@ -687,34 +729,20 @@ async def main(prompt, model_name="gpt-oss:latest", agent_name="default"):
         chat_id = str(uuid.uuid4())
         chat_id_file.write_text(chat_id)
 
-    ctx = MemoryContext(session=memory, embeder=embeder, chat_id=chat_id)
+    ctx = MemoryContext(session=memory, embeder=embeder, chat_id=chat_id, client=None)  # client set below
     await memory.embed_memories(embeder)
 
 
 
     async with AsyncExitStack() as stack:
         mcp_servers = [await stack.enter_async_context(m) for m in mcps]
+        mem_service_url = os.getenv("MEM_SERVICE_URL", "http://localhost:8765")
+        mem_client = await stack.enter_async_context(MemoryClient(mem_service_url))
+        ctx.client = mem_client
 
-        # ── Agent 2: only leaves a note and rating ──────────────────────────
-        agent2_kwargs: dict = {
-            "name": "note_taker",
-            "model": model_name,
-            "model_settings": base_model_settings,
-            "instructions": (
-                "You are a memory note-taker. Your sole responsibility is to call "
-                "`leave_note_and_rate` with a concise note summarising what happened in "
-                "the conversation and a ranking of how useful the recalled memories were "
-                "(-2 to 2). Do nothing else."
-            ),
-            "tools": [leave_note_and_rate],
-        }
-        if mcp_servers:
-            agent2_kwargs["mcp_servers"] = mcp_servers
-        agent2 = Agent(**agent2_kwargs)
-
-        # ── Agent 1: main agent – searches memory then handles the user request ──
-        # search_in_memory MUST be the first tool call; once done, inject_recent_sessions_filter
-        # becomes a no-op (guarded by search_done flag) so recent sessions are not re-injected.
+        # ── Agent 1: single agent – search → do work → leave note ──────────
+        # search_in_memory MUST be the first tool call (forced by inject_recent_sessions_filter).
+        # leave_note_and_rate MUST be the last tool call before the final text reply.
         agent1_instructions = (
             (agent_cfg.get("instructions") or "") +
             "\n\n## TOOL PROTOCOL ADDENDUM\n"
@@ -723,21 +751,14 @@ async def main(prompt, model_name="gpt-oss:latest", agent_name="default"):
             "  - `description`: precise technical phrasing of what is sought\n"
             "  - `summary`: colloquial/narrative restatement of the same topic\n"
             "  - `hypothesis`: a hypothetical excerpt (log line, code snippet, note) you expect to find\n"
-            "- Do not use keywords. Write complete sentences.\n\n"
-            "**`leave_note_and_rate` — NOT AVAILABLE TO YOU**\n"
-            "- This tool is handled by the `note_taker` agent.\n"
-            "- When your work is complete, hand off to `note_taker`. Do not attempt to call "
-            "`leave_note_and_rate` yourself."
+            "- Do not use keywords. Write complete sentences."
         )
         agent1_kwargs: dict = {
             "name": agent_cfg.get("name", "main_agent"),
             "model": model_name,
-            # tool_choice="required" forces a tool call on every turn,
-            # preventing the model from skipping search_in_memory on the first turn.
-            "model_settings": ModelSettings(tool_choice="required"),
+            "model_settings": base_model_settings,
             "instructions": agent1_instructions,
-            "tools": [search_in_memory, read_tutorial],
-            "handoffs": [agent2],
+            "tools": [search_in_memory, leave_note_and_rate, read_tutorial],
         }
         if mcp_servers:
             agent1_kwargs["mcp_servers"] = mcp_servers
@@ -770,7 +791,10 @@ async def main(prompt, model_name="gpt-oss:latest", agent_name="default"):
         except agents.exceptions.MaxTurnsExceeded as e:
             print(e)
 
-        await memory.save_from(session, chat_id)
+        # Save the session via the memory service
+        items = await session.get_items()
+        if items:
+            await mem_client.save_sessions(chat_id=chat_id, items=items)
 
     Render().output("\n---\n" + result.final_output)
 
