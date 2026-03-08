@@ -133,3 +133,10 @@ class MemoryClient:
             },
         )
         self._raise_for(resp)
+
+    async def get_note(self, chat_id: str) -> str | None:
+        """Return the most recent note for chat_id, or None if no note exists."""
+        resp = await self._http.get("/get_note", params={"chat_id": chat_id})
+        self._raise_for(resp)
+        return resp.json().get("note")
+

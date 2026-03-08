@@ -1,42 +1,19 @@
 import asyncio
-from contextlib import AsyncExitStack
-from dataclasses import dataclass, field
 import json
-import pathlib
-from pathlib import Path
 import os
+import pathlib
 import sqlite3
 import uuid
-
+from pathlib import Path
 from typing import Any, List, Dict, override
-from urllib.parse import quote
 
 import numpy as np
 
-import agents
-#from agents import Agent, Runner, Session, SQLiteSession, RunConfig, RunContextWrapper, function_tool
-from agents import (
-    Agent,
-    Runner,
-    RunConfig,
-    RunContextWrapper,    
-    Session,
-    SQLiteSession,
-    function_tool,
-    set_default_openai_api,
-    set_default_openai_client,
-    set_tracing_disabled,
-)
-from agents.run import ModelInputData, CallModelData
+from agents import SQLiteSession, Session
 from agents.items import TResponseInputItem
-from agents.model_settings import ModelSettings
-from mcp.types import CallToolResult, GetPromptResult, InitializeResult, ListPromptsResult, TextContent
-from openai import AsyncOpenAI
 from openai.types.shared import Reasoning
-from sadk.memory_client import MemoryClient
-from .utils import _Singleton, Render, simple_handle_response_input_item_param
+
 from .agent_hive import AgentHive
-from .tutorial import read_tutorial
 
 DOT_SADK_CHAT_ID = ".sadk_session_id"
 CONTINUITY_FILE = pathlib.Path(os.getenv("XDG_CONFIG_HOME", "~/.config")).expanduser() / "sadk" / "continuity.txt"
@@ -166,6 +143,17 @@ class Memory(SQLiteSession):
         )
         conn.commit()
         return self.session_id
+
+    def get_note(self, chat_id: str) -> str | None:
+        """Return the most recent note text for chat_id, or None if no note exists."""
+        conn = self._get_connection()
+        cur = conn.execute(
+            "SELECT note FROM chat_info WHERE chat_id = ? ORDER BY created_at DESC LIMIT 1",
+            (chat_id,),
+        )
+        row = cur.fetchone()
+        return row[0] if row else None
+
 
     @override
     def _get_connection(self):
@@ -395,49 +383,8 @@ class EmbedGear:
 
 
 
-@dataclass
-class MemoryContext:
-    session: Memory
-    embeder: EmbedGear
-    chat_id: str
-    client: MemoryClient
-    # A temporary holding area for items fetched during this turn
-    memory_items: List[str] = field(default_factory=list)
-    recalled_sessions: List[str] = field(default_factory=list)
-    final_rank: int = 1
-    # Set to True once search_in_memory has been called; gates recent-session injection
-    search_done: bool = False
 
-@function_tool
-async def leave_note_and_rate(ctx: RunContextWrapper[MemoryContext], note: str, rank: int) -> str:
-    """
-    Rate the utility of the recalled sessions before providing the final response
-    and Leave a note for the next session.
 
-    Rating is to optimize the memory engine for future interactions.
-    In the note, save instructions, context, or reminders that should be persisted
-    to the beginning of the next session (after a restart).
-
-    Args:
-        note (str): The content of the note to save.
-        rank (int): An integer rating between -2 and 2.
-                   2: Recalled context was extremely helpful.
-                   0: Context was neutral or only slightly relevant.
-                  -2: Context was irrelevant or distracting.
-    """
-    mem_ctx = ctx.context
-    # Write the note locally for the startup-note feature
-    CONTINUITY_FILE.parent.mkdir(parents=True, exist_ok=True)
-    with open(CONTINUITY_FILE, "w") as f:
-        f.write(note)
-    # Persist note + update ranks via the memory service
-    await mem_ctx.client.leave_note_and_rate(
-        chat_id=mem_ctx.chat_id,
-        note=note,
-        rank=rank,
-        recalled_sessions=list(set(mem_ctx.recalled_sessions)),
-    )
-    return "Note and rank are saved."
 
 def _format_item_as_text(item: dict) -> str | None:
     """
@@ -480,74 +427,8 @@ def _format_item_as_text(item: dict) -> str | None:
     return None
 
 
-async def search_in_memory_raw(
-    ctx: RunContextWrapper[MemoryContext],
-    description: str,
-    summary: str,
-    hypothesis: str
-) -> str:
-    """
-    Search past sessions using semantic vector similarity and return their contents as text.
-
-    CRITICAL USAGE INSTRUCTIONS:
-    - This tool uses embedding distance, NOT keyword matching.
-    - Do NOT use short keywords or vague queries (e.g., "python error").
-    - Generate full, hypothetical sentences/paragraphs representing the *content* you expect to find.
-
-    The returned text contains the matched sessions flattened into readable lines.
-    Tool call results from those sessions are replaced with RESULT_OMITTED.
-    Tool calls themselves are shown as function-call lines.
-
-    Args:
-        description (str): A direct, technical description of the information sought.
-        summary (str): A conversational or colloquial summary of the event.
-        hypothesis (str): A hypothetical snippet of the specific log, code, or text you are looking for.
-
-    Returns:
-        str: Matched session contents as human-readable text, or a not-found message.
-    """
-    mem_ctx = ctx.context
-    result = await mem_ctx.client.search_in_memory(
-        chat_id=mem_ctx.chat_id,
-        description=description,
-        summary=summary,
-        hypothesis=hypothesis,
-    )
-    mem_ctx.search_done = True
-    mem_ctx.recalled_sessions.extend(result.recalled_sessions)
-    return result.text
 
 
-search_in_memory = function_tool(func=search_in_memory_raw, name_override="search_in_memory")
-
-
-async def rate_before_final(ctx: RunContextWrapper[MemoryContext], rank: int) -> str:
-    """
-    Rate the utility of the recalled sessions before providing the final response.
-    Use this to optimize the memory engine for future interactions.
-
-    Args:
-        rank (int): An integer rating between -2 and 2.
-                   2: Recalled context was extremely helpful.
-                   0: Context was neutral or only slightly relevant.
-                  -2: Context was irrelevant or distracting.
-    """
-    memory = ctx.context.session
-    recalled = list(set(ctx.context.recalled_sessions))
-
-    if rank > 0:
-        # Success path: Current session inherits the authority of the best recalled memory
-        max_recalled_rank = await memory.get_max_rank(recalled)
-        ctx.context.final_rank = max_recalled_rank + rank
-    else:
-        # Baseline/Failure path
-        ctx.context.final_rank = rank
-
-    # Reward/Penalize all recalled memories based on the model's judgment
-    for s_id in recalled:
-        await memory.update_session_rank(s_id, delta=rank)
-
-    return "Rating accepted."
 
 def estimate_tokens(items: List[TResponseInputItem]) -> int:
     """Roughly estimate tokens based on character count (approx 4 chars/token)."""
@@ -563,274 +444,9 @@ def estimate_tokens(items: List[TResponseInputItem]) -> int:
     return total_chars // 4
 
 
-def _is_search_in_memory_call(item: dict) -> bool:
-    """Return True if this is an assistant message that only calls search_in_memory."""
-    if item.get("role") != "assistant":
-        return False
-    tool_calls = item.get("tool_calls") or []
-    return bool(tool_calls) and all(
-        (tc.get("function") or {}).get("name") == "search_in_memory"
-        for tc in tool_calls
-    )
-
-
-def _strip_tool_outputs(items: list) -> list:
-    """Remove tool outputs (role='tool') and search_in_memory calls from history items."""
-    return [
-        item for item in items
-        if item.get("role") != "tool" and not _is_search_in_memory_call(item)
-    ]
-
-
-async def _build_injected_sessions(
-    session: "Memory",
-    session_ids: List[str],
-    label: str,
-    token_budget: int,
-    seen_sessions: set,
-    recalled_sessions: List[str] | None = None,
-) -> tuple:
-    """
-    Fetch and filter sessions by ID, stripping tool outputs and honouring the token budget.
-    Returns (injected_messages, tokens_used).
-    """
-    injected: List[TResponseInputItem] = []
-    tokens_used = 0
-
-    if not session_ids:
-        return injected, tokens_used
-
-    injected.append({"role": "system", "content": f"--- {label} ---"})
-
-    for session_id in session_ids:
-        if session_id in seen_sessions:
-            continue
-        seen_sessions.add(session_id)
-
-        past_items = await session.get_items_by_session_id(session_id)
-        if not past_items:
-            continue
-
-        filtered = _strip_tool_outputs([item for item, _ in past_items])
-        session_tokens = estimate_tokens(filtered)
-
-        if tokens_used + session_tokens > token_budget:
-            break
-
-        tokens_used += session_tokens
-
-        if recalled_sessions is not None:
-            recalled_sessions.append(session_id)
-
-        injected.extend(filtered)
-
-    injected.append({"role": "system", "content": f"--- END OF {label} ---"})
-    return injected, tokens_used
-
-
-async def inject_recent_sessions_filter(data: CallModelData[MemoryContext]) -> ModelInputData:
-    """
-    Input filter: injects the 20 most recent sessions (tool outputs stripped) but ONLY
-    before search_in_memory has been called.  Once search_done is True the filter is a no-op
-    so the model isn't re-flooded with recent history on every subsequent model call.
-    Also injects a mandatory forcing message on the first turn so the model cannot skip
-    the search_in_memory call even with reasoning models.
-    """
-    context = data.context
-    if not context or context.search_done:
-        # After search is done, stop injecting recent sessions
-        return data.model_data
-
-    current_history = list(data.model_data.input)
-    current_token_count = estimate_tokens(current_history)
-    TOKEN_LIMIT = 96000
-
-    recent_session_ids = await context.session.get_recent_sessions(20)
-    seen: set = set()
-
-    injected, _ = await _build_injected_sessions(
-        context.session,
-        recent_session_ids,
-        "RECENT MEMORY",
-        TOKEN_LIMIT - current_token_count,
-        seen,
-    )
-
-    # Hard forcing message: shown only before search_in_memory fires
-    force_msg = {
-        "role": "system",
-        "content": (
-            "[MANDATORY] Your FIRST and ONLY action right now is to call `search_in_memory`. "
-            "Do NOT write any text. Do NOT think out loud. Call the tool immediately."
-        ),
-    }
-
-    return ModelInputData(
-        input=injected + current_history + [force_msg],
-        instructions=data.model_data.instructions,
-    )
-
-def _get_mcp_by_typename(tname: str, name: str, params: str):
-    mcp_class = getattr(agents.mcp, tname)
-    class wrapped_mcp(mcp_class):
-        @override
-        async def call_tool(
-                self,
-                tool_name: str,
-                arguments: dict[str, Any] | None,
-                meta: dict[str, Any] | None = None,
-        ) -> CallToolResult:
-             res = await super().call_tool(
-                 tool_name,
-                 arguments,
-                # meta
-             )
-             if len(res.model_dump_json()) > 32768:
-                 return CallToolResult(isError=True, content=[TextContent(type="text", text="The function result exceeds size limit.")])
-             return res
-    return wrapped_mcp(name=name,
-                     params=params,
-                     cache_tools_list=True,
-                     client_session_timeout_seconds=60)
-
-async def main(prompt, model_name="gpt-oss:latest", agent_name="default"):
-    ah = AgentHive()
-    agent_cfg = ah.get_agent(agent_name)
-    client = AsyncOpenAI(
-        base_url="http://127.0.0.1:11434/v1",
-        api_key="dummy",
-    )
-    set_default_openai_client(client=client, use_for_tracing=False)
-    set_default_openai_api("chat_completions")
-    set_tracing_disabled(disabled=True)
-
-    base_model_settings = ModelSettings(tool_choice="auto")
-
-    mcps = [
-        _get_mcp_by_typename(x["type"], x["name"], x["params"])
-        for x in agent_cfg.get("mcp", [])
-    ]
-
-    if CONTINUITY_FILE.exists():
-        with open(CONTINUITY_FILE, "r") as f:
-            note = f.read()
-        if note.strip():
-            prompt = f"{prompt}\n\n[System Note from previous session]:\n{note}"
-
-    memory = Memory.create()
-    c = AsyncOpenAI(base_url="http://127.0.0.1:11435/v1", api_key="no")
-    embeder = EmbedGear(c, "nomic-embed-text:latest")
-
-    # Resolve chat_id: use the per-directory session file if present
-    chat_id_file = Path(".") / ".sadk_session_id"
-    if chat_id_file.exists():
-        chat_id = chat_id_file.read_text().strip()
-    else:
-        chat_id = str(uuid.uuid4())
-        chat_id_file.write_text(chat_id)
-
-    ctx = MemoryContext(session=memory, embeder=embeder, chat_id=chat_id, client=None)  # client set below
-    await memory.embed_memories(embeder)
 
 
 
-    async with AsyncExitStack() as stack:
-        mcp_servers = [await stack.enter_async_context(m) for m in mcps]
-        mem_service_url = os.getenv("MEM_SERVICE_URL", "http://localhost:8765")
-        mem_client = await stack.enter_async_context(MemoryClient(mem_service_url))
-        ctx.client = mem_client
 
-        # ── Agent 1: single agent – search → do work → leave note ──────────
-        # search_in_memory MUST be the first tool call (forced by inject_recent_sessions_filter).
-        # leave_note_and_rate MUST be the last tool call before the final text reply.
-        agent1_instructions = (
-            (agent_cfg.get("instructions") or "") +
-            "\n\n## TOOL PROTOCOL ADDENDUM\n"
-            "**`search_in_memory` (STEP 1 — REQUIRED FIRST CALL)**\n"
-            "- Derive three full-sentence queries from the user's prompt:\n"
-            "  - `description`: precise technical phrasing of what is sought\n"
-            "  - `summary`: colloquial/narrative restatement of the same topic\n"
-            "  - `hypothesis`: a hypothetical excerpt (log line, code snippet, note) you expect to find\n"
-            "- Do not use keywords. Write complete sentences."
-        )
-        agent1_kwargs: dict = {
-            "name": agent_cfg.get("name", "main_agent"),
-            "model": model_name,
-            "model_settings": base_model_settings,
-            "instructions": agent1_instructions,
-            "tools": [search_in_memory, leave_note_and_rate, read_tutorial],
-        }
-        if mcp_servers:
-            agent1_kwargs["mcp_servers"] = mcp_servers
-        agent1 = Agent(**agent1_kwargs)
 
-        # inject_recent_sessions_filter fires only before search_in_memory is called
-        run_config = RunConfig(call_model_input_filter=inject_recent_sessions_filter)
-        session = SQLiteSession("temp")
 
-        try:
-            result = Runner.run_streamed(
-                agent1,
-                prompt,
-                context=ctx,
-                run_config=run_config,
-                session=session,
-            )
-            async for event in result.stream_events():
-                match event.type:
-                    case "raw_response_event":
-                        continue
-                    case "agent_updated_stream_event":
-                        Render().output(f"Handoff to Agent: {event.new_agent.name}")
-                    case "run_item_stream_event":
-                        ii = event.item.to_input_item()
-                        Render().output(simple_handle_response_input_item_param(ii))
-                    case _:
-                        print("other event")
-                        print(event)
-        except agents.exceptions.MaxTurnsExceeded as e:
-            print(e)
-
-        # Save the session via the memory service
-        items = await session.get_items()
-        if items:
-            await mem_client.save_sessions(chat_id=chat_id, items=items)
-
-    Render().output("\n---\n" + result.final_output)
-
-def test_main():
-    import asyncio
-    import sys
-
-    from openai import AsyncOpenAI
-
-    sess = MemSession(sys.argv[1])
-    search_phrase = sys.argv[2:5]
-    em = sys.argv[5]
-    sess.init_database()
-
-    c = AsyncOpenAI(base_url="http://127.0.0.1:11435/v1", api_key="no")
-#    m = EmbedGear(c, "embeddinggemma:300m")
-#    m = EmbedGear(c, "nomic-embed-text:latest")
-    m = EmbedGear(c, em)
-
-    async def embd_and_search():
-        await sess.embed_memories(m)
-
-        v = [ await m.get_embedding(x) for x in search_phrase]
-        l = await sess.search_similar(v, 10)
-        for i in l:
-            print(i)
-    asyncio.run(embd_and_search())
-    return
-    #    cur = db.execute("select vec_length(vec_bit(?))", [v])
-    cur = db.execute("select vec_length(?)", [v.astype(np.int8)])
-    print(cur.fetchall())
-    cur = db.execute("select vec_distance_hamming(vec_bit(?), vec_bit(?))", [v, v])
-    print(cur.fetchall())
-    db.execute("create virtual table vec_e using vec0(v bit[768])")
-    db.execute("insert into vec_e(v) values (vec_bit(?))", [v])
-
-if __name__ == "__main__":
-    import sys
-    asyncio.run(main(sys.argv[1]))

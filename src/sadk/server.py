@@ -132,3 +132,19 @@ async def leave_note_and_rate(req: LeaveNoteRequest) -> StatusResponse:
         raise HTTPException(status_code=500, detail=str(exc)) from exc
 
     return StatusResponse(status="ok")
+
+
+class NoteResponse(BaseModel):
+    note: str | None
+
+
+@app.get("/get_note", response_model=NoteResponse)
+async def get_note(chat_id: str) -> NoteResponse:
+    """Return the most recent note saved for chat_id, or null if none exists."""
+    try:
+        note = _memory.get_note(chat_id)
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+    return NoteResponse(note=note)
+

@@ -10,11 +10,14 @@ readme = "README.md"
 requires-python = ">=3.10" # Cyclopts requires Python >= 3.10
 dependencies = [
     "cyclopts",
+    "fastapi",
+    "httpx",
     "openai",
     "openai-agents",
     "python-frontmatter",
     "rich",
     "toml",
+    "uvicorn[standard]",
 ]
 
 [project.scripts]
