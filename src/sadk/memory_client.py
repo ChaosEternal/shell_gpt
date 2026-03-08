@@ -140,3 +140,34 @@ class MemoryClient:
         self._raise_for(resp)
         return resp.json().get("note")
 
+    async def save_sessions_from(
+        self,
+        chat_id: str,
+        events: list[dict[str, Any]],
+    ) -> str:
+        """
+        Convert Google ADK session events to OpenAI format and persist them.
+
+        Each event should follow the Google ADK structure::
+
+            {
+              "author": "user" | "model" | "<tool_name>",
+              "content": {
+                "role": "user" | "model",
+                "parts": [
+                  {"text": "..."},
+                  {"function_call": {"name": "...", "args": {...}}},
+                  {"function_response": {"name": "...", "response": {...}}}
+                ]
+              }
+            }
+
+        Returns the new session_id.
+        """
+        resp = await self._http.post(
+            "/save_sessions_from",
+            json={"chat_id": chat_id, "events": events},
+        )
+        self._raise_for(resp)
+        return resp.json()["session_id"]
+
